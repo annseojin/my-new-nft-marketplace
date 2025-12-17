@@ -8,7 +8,7 @@ import {
   getIPFSUrl,
   getIPFSGatewayUrl,
 } from '@/lib/ipfs';
-import { mintNFT } from '@/lib/contracts';
+import { mintNFT, publicMintNFT } from '@/lib/contracts';
 
 interface MintNFTModalProps {
   onClose: () => void;
@@ -67,7 +67,7 @@ export function MintNFTModal({ onClose, onSuccess }: MintNFTModalProps) {
 
       // 3. NFT 민팅
       setStatus('NFT를 민팅하는 중...');
-      const receipt = await mintNFT(address, tokenURI);
+      const receipt = await publicMintNFT(tokenURI);
 
       setStatus(`성공! 트랜잭션 해시: ${receipt.transactionHash}`);
 

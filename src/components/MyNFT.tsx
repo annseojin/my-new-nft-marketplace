@@ -367,14 +367,14 @@ export function MyNFT() {
           </p>
         </div>
         <div className="flex gap-2">
-          {isOwner && (
-            <button
-              onClick={() => setShowMintModal(true)}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-            >
-              새로운 NFT 등록
-            </button>
-          )}
+          (
+          <button
+            onClick={() => setShowMintModal(true)}
+            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+          >
+            새로운 NFT 등록
+          </button>
+          )
           <button
             onClick={() => {
               fetchMyNFTs();
@@ -412,14 +412,14 @@ export function MyNFT() {
           <p className="text-gray-500 dark:text-gray-400">
             보유한 NFT가 없습니다.
           </p>
-          {isOwner && (
-            <button
-              onClick={() => setShowMintModal(true)}
-              className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-            >
-              새로운 NFT 등록
-            </button>
-          )}
+          (
+          <button
+            onClick={() => setShowMintModal(true)}
+            className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+          >
+            새로운 NFT 등록
+          </button>
+          )
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -437,7 +437,7 @@ export function MyNFT() {
       )}
 
       {/* 민팅 모달 */}
-      {showMintModal && isOwner && (
+      {showMintModal && (
         <MintNFTModal
           onClose={() => {
             setShowMintModal(false);

@@ -11,6 +11,8 @@ import {
   parseTokenAmount,
   transferToken,
   balanceOf,
+  claimFromFaucet,
+  hasClaimedFromFaucet,
 } from '@/lib/contracts';
 
 export function Profile() {
@@ -35,7 +37,12 @@ export function Profile() {
   const [isTransferring, setIsTransferring] = useState(false);
   const [transferStatus, setTransferStatus] = useState<string>('');
 
-  // 클라이언트에서만 마운트되도록 처리
+  // Faucet 상태
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [claimStatus, setClaimStatus] = useState<string>('');
+  const [faucetClaimed, setFaucetClaimed] = useState<boolean>(false);
+  const [faucetChecking, setFaucetChecking] = useState<boolean>(false);
+
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -52,14 +59,29 @@ export function Profile() {
     }
   };
 
+  // Faucet claimed 조회
+  const fetchFaucetStatus = async () => {
+    if (!isConnected || !address) return;
+
+    setFaucetChecking(true);
+    try {
+      const claimed = await hasClaimedFromFaucet(address);
+      setFaucetClaimed(claimed);
+    } catch (e) {
+      console.error('Faucet claimed 조회 오류:', e);
+      // 실패해도 UX는 유지 (버튼은 활성 상태로 두되, 누르면 에러로 안내)
+      setFaucetClaimed(false);
+    } finally {
+      setFaucetChecking(false);
+    }
+  };
+
   // 토큰 정보 및 잔액 조회
   const fetchTokenInfo = async () => {
     if (!isConnected || !address) {
       console.log('토큰 정보 조회: 지갑이 연결되지 않음');
       return;
     }
-
-    console.log('토큰 정보 조회 시작:', address);
 
     try {
       const [decimals, symbol, balance] = await Promise.all([
@@ -70,12 +92,6 @@ export function Profile() {
           return BigInt(0);
         }),
       ]);
-
-      console.log('토큰 정보 조회 완료:', {
-        decimals,
-        symbol,
-        balance: balance.toString(),
-      });
 
       setTokenDecimals(decimals);
       setTokenSymbol(symbol);
@@ -89,10 +105,11 @@ export function Profile() {
     if (mounted && isConnected) {
       fetchTokenInfo();
       fetchNFTBalance();
+      fetchFaucetStatus(); // ✅ 추가
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted, isConnected, address]);
 
-  // 서버 사이드 렌더링 시 로딩 표시
   if (!mounted) {
     return (
       <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
@@ -119,6 +136,39 @@ export function Profile() {
     if (typeof window !== 'undefined' && navigator.clipboard) {
       navigator.clipboard.writeText(text);
       alert('주소가 클립보드에 복사되었습니다!');
+    }
+  };
+
+  // Faucet claim 핸들러
+  const handleClaim = async () => {
+    if (!isConnected || !address) {
+      alert('지갑을 연결해주세요.');
+      return;
+    }
+
+    setIsClaiming(true);
+    setClaimStatus('');
+
+    try {
+      setClaimStatus('토큰 지급 신청 중...');
+      const receipt = await claimFromFaucet();
+      setClaimStatus(`✅ 지급 완료! TX: ${receipt.transactionHash}`);
+
+      // 상태/잔액 갱신
+      setFaucetClaimed(true);
+      await fetchTokenInfo();
+      await fetchFaucetStatus();
+    } catch (e: any) {
+      const msg =
+        e?.shortMessage ||
+        e?.message ||
+        '이미 지급받았거나(1회 제한), 트랜잭션이 거절되었습니다.';
+      setClaimStatus(`❌ 지급 실패: ${msg}`);
+
+      // 이미 claimed=true라서 실패했을 수도 있으니 다시 조회
+      await fetchFaucetStatus();
+    } finally {
+      setIsClaiming(false);
     }
   };
 
@@ -192,6 +242,35 @@ export function Profile() {
               <p className="text-xl font-bold text-green-800 dark:text-green-200">
                 {formatTokenAmount(tokenBalance, tokenDecimals)} {tokenSymbol}
               </p>
+
+              {/* Faucet 상태 표시 */}
+              <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                {faucetChecking
+                  ? '지급 가능 여부 확인 중...'
+                  : faucetClaimed
+                  ? '✅ 이미 지급받았습니다 (1인 1회)'
+                  : '🟢 아직 신청 가능합니다'}
+              </p>
+
+              {/* Faucet claim 버튼 */}
+              <button
+                onClick={handleClaim}
+                disabled={isClaiming || faucetChecking || faucetClaimed}
+                className="mt-2 w-full px-3 py-2 bg-emerald-500 text-white rounded hover:bg-emerald-600 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {faucetClaimed
+                  ? '이미 지급 완료'
+                  : isClaiming
+                  ? '지급 처리 중...'
+                  : '💧 토큰 받기 (1000 MTK)'}
+              </button>
+
+              {claimStatus && (
+                <p className="mt-2 text-xs text-gray-700 dark:text-gray-200 break-all">
+                  {claimStatus}
+                </p>
+              )}
+
               {tokenBalance > BigInt(0) && (
                 <button
                   onClick={() => setShowTransferModal(true)}
@@ -219,6 +298,7 @@ export function Profile() {
               onClick={() => {
                 fetchTokenInfo();
                 fetchNFTBalance();
+                fetchFaucetStatus();
               }}
               disabled={isLoading}
               className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:opacity-50"
@@ -251,17 +331,14 @@ export function Profile() {
             setTransferStatus('');
 
             try {
-              // 주소 유효성 검사
               if (!to.startsWith('0x') || to.length !== 42) {
                 throw new Error('올바른 지갑 주소를 입력해주세요.');
               }
 
-              // 금액 검사
               const amountInWei = parseTokenAmount(amount, tokenDecimals);
               if (amountInWei > tokenBalance) {
                 throw new Error('잔액이 부족합니다.');
               }
-
               if (amountInWei <= BigInt(0)) {
                 throw new Error('0보다 큰 금액을 입력해주세요.');
               }
@@ -276,10 +353,8 @@ export function Profile() {
                 `전송 완료! 트랜잭션: ${receipt.transactionHash}`
               );
 
-              // 잔액 새로고침
               await fetchTokenInfo();
 
-              // 3초 후 모달 닫기
               setTimeout(() => {
                 setShowTransferModal(false);
                 setTransferTo('');
@@ -303,7 +378,6 @@ export function Profile() {
   );
 }
 
-// 토큰 전송 모달 컴포넌트
 function TokenTransferModal({
   tokenBalance,
   tokenDecimals,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useAccount } from 'wagmi';
 import {
   getListing,
@@ -18,10 +18,7 @@ import {
   ownerOf,
   getTokenURI,
 } from '@/lib/contracts';
-import {
-  marketplaceContractAddress,
-  tokenContractAddress,
-} from '@/lib/constants';
+import { marketplaceContractAddress } from '@/lib/constants';
 import { getIPFSGatewayUrl } from '@/lib/ipfs';
 
 interface NFTListing {
@@ -33,30 +30,59 @@ interface NFTListing {
   name?: string;
 }
 
+type ToastType = 'success' | 'error' | 'info';
+
 export function Marketplace() {
   const [mounted, setMounted] = useState(false);
   const { address, isConnected } = useAccount();
+
   const [listings, setListings] = useState<NFTListing[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isTxPending, setIsTxPending] = useState(false);
+
+  const [toast, setToast] = useState<{
+    type: ToastType;
+    message: string;
+  } | null>(null);
+
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [onlyMine, setOnlyMine] = useState(false);
+
   const [selectedNFT, setSelectedNFT] = useState<NFTListing | null>(null);
   const [nftDetails, setNftDetails] = useState<{
     description?: string;
     attributes?: any[];
     owner?: string;
   } | null>(null);
-  const [tokenBalance, setTokenBalance] = useState<bigint>(BigInt(0));
+
+  const [tokenBalance, setTokenBalance] = useState<bigint>(0n);
   const [tokenDecimals, setTokenDecimals] = useState<number>(18);
   const [tokenSymbol, setTokenSymbol] = useState<string>('MTK');
-  const [maxTokenId, setMaxTokenId] = useState(100); // 최대 조회할 토큰 ID 범위
+
+  const [maxTokenId] = useState(100);
   const [status, setStatus] = useState<string>('');
   const [balanceError, setBalanceError] = useState<string>('');
 
-  // 클라이언트에서만 마운트되도록 처리
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  useEffect(() => setMounted(true), []);
 
-  // 배치 처리 헬퍼 함수
+  const showToast = (type: ToastType, message: string) => {
+    setToast({ type, message });
+    setTimeout(() => setToast(null), 2800);
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(text);
+        showToast('success', '복사 완료');
+      } else {
+        showToast('error', '복사 불가');
+      }
+    } catch {
+      showToast('error', '복사 실패');
+    }
+  };
+
   const processBatch = async <T, R>(
     items: T[],
     batchSize: number,
@@ -75,138 +101,6 @@ export function Marketplace() {
     return results;
   };
 
-  // NFT 목록 조회 (최적화: 병렬 처리)
-  const fetchListings = async () => {
-    setIsLoading(true);
-    const allListings: NFTListing[] = [];
-
-    try {
-      // 모든 토큰 ID의 리스팅 정보를 병렬로 확인 (배치 처리)
-      const tokenIds = Array.from({ length: maxTokenId + 1 }, (_, i) =>
-        BigInt(i)
-      );
-
-      const listedTokens: Array<{
-        tokenId: bigint;
-        listing: Awaited<ReturnType<typeof getListing>>;
-      }> = [];
-      await processBatch(tokenIds, 20, async (tokenId) => {
-        try {
-          const listing = await getListing(tokenId);
-          if (listing.isListed) {
-            return { tokenId, listing };
-          }
-        } catch {
-          // 토큰이 존재하지 않거나 리스팅되지 않음
-        }
-        return null;
-      }).then((results) => {
-        listedTokens.push(...results);
-      });
-
-      if (listedTokens.length === 0) {
-        setListings([]);
-        setIsLoading(false);
-        return;
-      }
-
-      // 리스팅된 NFT의 메타데이터를 병렬로 조회
-      const listingPromises = listedTokens.map(
-        async ({ tokenId, listing }): Promise<NFTListing> => {
-          let image: string | undefined;
-          let name: string | undefined;
-
-          try {
-            const tokenURI = await getTokenURI(tokenId);
-            const metadata = await fetchMetadata(tokenURI);
-            image = metadata?.image;
-            name = metadata?.name;
-          } catch (error) {
-            console.warn(`Token ${tokenId} metadata fetch failed:`, error);
-          }
-
-          return {
-            tokenId,
-            price: listing.price,
-            seller: listing.seller,
-            isListed: true,
-            image,
-            name,
-          };
-        }
-      );
-
-      const listings = await Promise.all(listingPromises);
-      setListings(listings);
-    } catch (error) {
-      console.error('목록 조회 오류:', error);
-      setListings([]);
-    }
-
-    setIsLoading(false);
-  };
-
-  // NFT 상세 정보 가져오기
-  const fetchNFTDetails = async (listing: NFTListing) => {
-    try {
-      const tokenURI = await getTokenURI(listing.tokenId);
-      const metadata = await fetchMetadata(tokenURI);
-      const owner = await ownerOf(listing.tokenId);
-
-      setNftDetails({
-        description: metadata?.description,
-        attributes: metadata?.attributes,
-        owner: owner,
-      });
-    } catch (error) {
-      console.error('NFT 상세 정보 가져오기 오류:', error);
-      setNftDetails(null);
-    }
-  };
-
-  // NFT 카드 클릭 핸들러
-  const handleNFTClick = async (listing: NFTListing) => {
-    setSelectedNFT(listing);
-    await fetchNFTDetails(listing);
-  };
-
-  // 토큰 정보 및 잔액 조회
-  const fetchTokenInfo = async () => {
-    if (!isConnected || !address) return;
-
-    try {
-      // 토큰 정보 조회 (decimals, symbol)
-      const [decimals, symbol, balance] = await Promise.all([
-        getTokenDecimals(),
-        getTokenSymbol(),
-        getTokenBalance(address).catch((err) => {
-          console.error('토큰 잔액 조회 오류:', err);
-          setBalanceError(
-            `잔액 조회 실패: ${err.message || '알 수 없는 오류'}`
-          );
-          return BigInt(0);
-        }),
-      ]);
-
-      setTokenDecimals(decimals);
-      setTokenSymbol(symbol);
-      setTokenBalance(balance);
-      setBalanceError('');
-
-      console.log('토큰 정보:', {
-        decimals,
-        symbol,
-        balance: balance.toString(),
-      });
-    } catch (error: any) {
-      console.error('토큰 정보 조회 오류:', error);
-      setBalanceError(
-        `토큰 정보 조회 실패: ${error.message || '알 수 없는 오류'}`
-      );
-    }
-  };
-
-  // IPFS URL을 게이트웨이 URL로 변환
   const convertIPFSUrl = (url: string): string => {
     if (url.startsWith('ipfs://')) {
       const hash = url.replace('ipfs://', '');
@@ -215,7 +109,6 @@ export function Marketplace() {
     return url;
   };
 
-  // 메타데이터 가져오기
   const fetchMetadata = async (tokenURI: string) => {
     try {
       let url = tokenURI;
@@ -225,22 +118,117 @@ export function Marketplace() {
       }
 
       const response = await fetch(url);
-      if (!response.ok) {
-        console.warn('메타데이터 조회 실패:', url, response.status);
-        return null;
-      }
+      if (!response.ok) return null;
 
       const metadata = await response.json();
+      if (metadata.image) metadata.image = convertIPFSUrl(metadata.image);
+      return metadata;
+    } catch {
+      return null;
+    }
+  };
 
-      // 이미지 URL도 IPFS 형식이면 변환
-      if (metadata.image) {
-        metadata.image = convertIPFSUrl(metadata.image);
+  const fetchListings = async () => {
+    setIsLoading(true);
+    try {
+      const tokenIds = Array.from({ length: maxTokenId + 1 }, (_, i) =>
+        BigInt(i)
+      );
+
+      const listedTokens = await processBatch(
+        tokenIds,
+        20,
+        async (tokenId): Promise<{ tokenId: bigint; listing: any } | null> => {
+          try {
+            const listing = await getListing(tokenId);
+            if (listing.isListed) return { tokenId, listing };
+          } catch {}
+          return null;
+        }
+      );
+
+      if (listedTokens.length === 0) {
+        setListings([]);
+        return;
       }
 
-      return metadata;
-    } catch (error) {
-      console.error('메타데이터 가져오기 오류:', error);
-      return null;
+      const newListings = await Promise.all(
+        listedTokens.map(async ({ tokenId, listing }) => {
+          let image: string | undefined;
+          let name: string | undefined;
+
+          try {
+            const tokenURI = await getTokenURI(tokenId);
+            const metadata = await fetchMetadata(tokenURI);
+            image = metadata?.image;
+            name = metadata?.name;
+          } catch {}
+
+          return {
+            tokenId,
+            price: listing.price,
+            seller: listing.seller,
+            isListed: true,
+            image,
+            name,
+          } as NFTListing;
+        })
+      );
+
+      setListings(newListings);
+    } catch (e) {
+      console.error(e);
+      setListings([]);
+      showToast('error', '목록 조회 실패');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchNFTDetails = async (listing: NFTListing) => {
+    try {
+      const tokenURI = await getTokenURI(listing.tokenId);
+      const metadata = await fetchMetadata(tokenURI);
+      const owner = await ownerOf(listing.tokenId);
+
+      setNftDetails({
+        description: metadata?.description,
+        attributes: metadata?.attributes,
+        owner,
+      });
+    } catch {
+      setNftDetails(null);
+    }
+  };
+
+  const handleNFTClick = async (listing: NFTListing) => {
+    setSelectedNFT(listing);
+    await fetchNFTDetails(listing);
+  };
+
+  const fetchTokenInfo = async () => {
+    if (!isConnected || !address) return;
+
+    try {
+      const [decimals, symbol, balance] = await Promise.all([
+        getTokenDecimals(),
+        getTokenSymbol(),
+        getTokenBalance(address).catch((err) => {
+          setBalanceError(
+            `잔액 조회 실패: ${err.message || '알 수 없는 오류'}`
+          );
+          return 0n;
+        }),
+      ]);
+
+      setTokenDecimals(decimals);
+      setTokenSymbol(symbol);
+      setTokenBalance(balance);
+      setBalanceError('');
+    } catch (error: any) {
+      setBalanceError(
+        `토큰 정보 조회 실패: ${error.message || '알 수 없는 오류'}`
+      );
     }
   };
 
@@ -249,506 +237,676 @@ export function Marketplace() {
       fetchListings();
       fetchTokenInfo();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected, address]);
 
   const handleBuy = async (tokenId: bigint, price: bigint) => {
     if (!isConnected || !address) {
-      alert('지갑을 연결해주세요.');
+      showToast('info', '지갑을 연결해주세요');
       return;
     }
 
+    setIsTxPending(true);
     try {
-      // 1. 토큰 승인 확인 및 처리
       const allowance = await getTokenAllowance(
         address,
         marketplaceContractAddress as `0x${string}`
       );
+
       if (allowance < price) {
         setStatus('토큰 승인 중...');
-        const approveHash = await approveToken(
+        const approveReceipt = await approveToken(
           marketplaceContractAddress as `0x${string}`,
-          price * BigInt(2) // 여유있게 승인
+          price * 2n
         );
-        setStatus(`토큰 승인 완료. 트랜잭션: ${approveHash.transactionHash}`);
+        setStatus(`토큰 승인 완료. TX: ${approveReceipt.transactionHash}`);
+        showToast('success', '토큰 승인 완료');
       }
 
-      // 2. NFT 구매
       setStatus('NFT 구매 중...');
       const receipt = await buyNFT(tokenId);
-      setStatus(`구매 완료! 트랜잭션: ${receipt.transactionHash}`);
+      setStatus(`구매 완료! TX: ${receipt.transactionHash}`);
+      showToast('success', '구매 완료');
 
-      // 목록 새로고침
       await fetchListings();
       await fetchTokenInfo();
 
-      setTimeout(() => setStatus(''), 5000);
+      setTimeout(() => setStatus(''), 4500);
     } catch (error: any) {
-      console.error('구매 오류:', error);
+      console.error(error);
       setStatus(`구매 실패: ${error.message || '알 수 없는 오류'}`);
-      setTimeout(() => setStatus(''), 5000);
+      showToast('error', '구매 실패');
+      setTimeout(() => setStatus(''), 4500);
+    } finally {
+      setIsTxPending(false);
     }
   };
 
   const handleList = async (tokenId: bigint, price: string) => {
     if (!isConnected || !address) {
-      alert('지갑을 연결해주세요.');
+      showToast('info', '지갑을 연결해주세요');
       return;
     }
 
+    setIsTxPending(true);
     try {
       const priceInWei = parseTokenAmount(price, tokenDecimals);
 
-      // 1. NFT 승인 확인 및 처리
       setStatus('NFT 승인 중...');
       const approved = await approveNFT(
         marketplaceContractAddress as `0x${string}`,
         tokenId
       );
-      setStatus(`NFT 승인 완료. 트랜잭션: ${approved.transactionHash}`);
+      setStatus(`NFT 승인 완료. TX: ${approved.transactionHash}`);
+      showToast('success', 'NFT 승인 완료');
 
-      // 2. 리스팅
       setStatus('판매 등록 중...');
       const receipt = await listNFT(tokenId, priceInWei);
-      setStatus(`판매 등록 완료! 트랜잭션: ${receipt.transactionHash}`);
+      setStatus(`판매 등록 완료! TX: ${receipt.transactionHash}`);
+      showToast('success', '판매 등록 완료');
 
-      // 목록 새로고침
       await fetchListings();
-
-      setTimeout(() => setStatus(''), 5000);
+      setTimeout(() => setStatus(''), 4500);
     } catch (error: any) {
-      console.error('판매 등록 오류:', error);
+      console.error(error);
       setStatus(`판매 등록 실패: ${error.message || '알 수 없는 오류'}`);
-      setTimeout(() => setStatus(''), 5000);
+      showToast('error', '판매 등록 실패');
+      setTimeout(() => setStatus(''), 4500);
+    } finally {
+      setIsTxPending(false);
     }
   };
 
   const handleCancel = async (tokenId: bigint) => {
     if (!isConnected || !address) {
-      alert('지갑을 연결해주세요.');
+      showToast('info', '지갑을 연결해주세요');
       return;
     }
 
+    setIsTxPending(true);
     try {
       setStatus('판매 취소 중...');
       const receipt = await cancelListing(tokenId);
-      setStatus(`판매 취소 완료! 트랜잭션: ${receipt.transactionHash}`);
+      setStatus(`판매 취소 완료! TX: ${receipt.transactionHash}`);
+      showToast('success', '판매 취소 완료');
 
-      // 목록 새로고침
       await fetchListings();
-
-      setTimeout(() => setStatus(''), 5000);
+      setTimeout(() => setStatus(''), 4500);
     } catch (error: any) {
-      console.error('판매 취소 오류:', error);
+      console.error(error);
       setStatus(`판매 취소 실패: ${error.message || '알 수 없는 오류'}`);
-      setTimeout(() => setStatus(''), 5000);
+      showToast('error', '판매 취소 실패');
+      setTimeout(() => setStatus(''), 4500);
+    } finally {
+      setIsTxPending(false);
     }
   };
 
-  // 서버 사이드 렌더링 시 로딩 표시
+  const filteredListings = useMemo(() => {
+    const kw = searchKeyword.trim().toLowerCase();
+
+    return listings.filter((l) => {
+      const mineOk = !onlyMine
+        ? true
+        : l.seller.toLowerCase() === address?.toLowerCase();
+
+      const name = (l.name || '').toLowerCase();
+      const idStr = l.tokenId.toString();
+
+      const searchOk =
+        kw.length === 0 ? true : name.includes(kw) || idStr.includes(kw);
+
+      return mineOk && searchOk;
+    });
+  }, [listings, onlyMine, searchKeyword, address]);
+
   if (!mounted) {
     return (
-      <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
-        <p className="text-gray-600 dark:text-gray-400">로딩 중...</p>
+      <div className="p-6 rounded-2xl border border-slate-200/60 bg-white shadow-sm">
+        <p className="text-slate-600">로딩 중...</p>
       </div>
     );
   }
 
   if (!isConnected) {
     return (
-      <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
-        <p className="text-yellow-800 dark:text-yellow-200">
-          마켓플레이스를 사용하려면 먼저 지갑을 연결해주세요.
-        </p>
+      <div className="p-6 rounded-2xl border border-amber-200/60 bg-amber-50 text-amber-900">
+        마켓플레이스를 사용하려면 먼저 지갑을 연결해주세요.
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* 토큰 잔액 및 상태 */}
-      <div className="space-y-2">
-        <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-          <div className="flex items-center justify-between">
+    <div className="min-h-[calc(100vh-140px)] bg-gradient-to-b from-slate-50 to-white dark:from-slate-950 dark:to-slate-900">
+      <div className="mx-auto max-w-6xl px-4 py-8 space-y-6">
+        {/* Toast */}
+        {toast && (
+          <div
+            className={`fixed top-5 right-5 z-[9999] rounded-2xl px-4 py-3 shadow-lg text-sm font-medium ${
+              toast.type === 'success'
+                ? 'bg-emerald-600 text-white'
+                : toast.type === 'error'
+                ? 'bg-rose-600 text-white'
+                : 'bg-slate-900 text-white'
+            }`}
+          >
+            {toast.message}
+          </div>
+        )}
+
+        {/* Loading overlay */}
+        {(isLoading || isTxPending) && (
+          <div className="fixed inset-0 bg-black/25 z-[9998] flex items-center justify-center">
+            <div className="rounded-2xl border border-slate-200/60 bg-white/90 backdrop-blur px-5 py-4 shadow-xl dark:border-slate-800 dark:bg-slate-900/80">
+              <div className="flex items-center gap-3">
+                <div className="w-5 h-5 border-2 border-slate-300 border-t-slate-900 rounded-full animate-spin dark:border-slate-700 dark:border-t-white" />
+                <p className="text-sm text-slate-800 dark:text-slate-100">
+                  처리 중...
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Token card */}
+        <div className="rounded-2xl border border-slate-200/60 bg-white/80 backdrop-blur shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+          <div className="p-5 flex items-center justify-between gap-4">
             <div>
-              <p className="text-blue-800 dark:text-blue-200 font-semibold">
-                내 토큰 잔액: {formatTokenAmount(tokenBalance, tokenDecimals)}{' '}
-                {tokenSymbol}
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                내 토큰 잔액
               </p>
-              {tokenBalance === BigInt(0) && (
-                <p className="text-xs text-blue-600 dark:text-blue-300 mt-1">
-                  토큰이 없습니다. MetaMask에서 토큰을 추가했는지 확인하세요.
+              <p className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">
+                {formatTokenAmount(tokenBalance, tokenDecimals)} {tokenSymbol}
+              </p>
+              {tokenBalance === 0n && (
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Faucet에서 토큰을 받은 뒤 이용하세요.
                 </p>
               )}
             </div>
+
             <button
               onClick={fetchTokenInfo}
-              className="text-xs px-3 py-1 bg-blue-200 dark:bg-blue-800 rounded hover:bg-blue-300 dark:hover:bg-blue-700"
+              className="rounded-xl px-4 py-2 text-sm font-medium
+                         bg-slate-900 text-white hover:bg-slate-800
+                         dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
             >
               새로고침
             </button>
           </div>
+
           {balanceError && (
-            <p className="text-xs text-red-600 dark:text-red-400 mt-2">
-              ⚠️ {balanceError}
-            </p>
+            <div className="px-5 pb-4">
+              <p className="text-xs text-rose-600 dark:text-rose-400">
+                ⚠️ {balanceError}
+              </p>
+            </div>
           )}
         </div>
+
+        {/* Status bar */}
         {status && (
-          <div
-            className={`p-3 rounded-lg ${
-              status.includes('완료')
-                ? 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'
-                : status.includes('실패')
-                ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
-                : 'bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-200'
-            }`}
+          <div className="rounded-2xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="p-4 flex items-start justify-between gap-3">
+              <p className="text-sm text-slate-700 dark:text-slate-200 break-all">
+                {status}
+              </p>
+
+              {status.includes('TX:') && (
+                <button
+                  className="shrink-0 rounded-xl px-3 py-2 text-xs font-medium
+                             border border-slate-200 bg-white hover:bg-slate-50
+                             dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+                  onClick={() => {
+                    const tx = status.split('TX:')[1]?.trim();
+                    if (tx) copyToClipboard(tx);
+                  }}
+                >
+                  TX 복사
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Header */}
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              마켓플레이스
+            </h2>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              검색/필터로 원하는 NFT를 빠르게 찾고, 토큰으로 구매하세요.
+            </p>
+          </div>
+
+          <button
+            onClick={() => {
+              fetchListings();
+              fetchTokenInfo();
+            }}
+            disabled={isLoading || isTxPending}
+            className="rounded-xl px-4 py-2 text-sm font-medium
+                       border border-slate-200 bg-white hover:bg-slate-50
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
           >
-            <p className="text-sm">{status}</p>
-          </div>
-        )}
-      </div>
+            새로고침
+          </button>
+        </div>
 
-      {/* 새로고침 버튼 */}
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold">마켓플레이스</h2>
-        <button
-          onClick={() => {
-            fetchListings();
-            fetchTokenInfo();
-          }}
-          disabled={isLoading}
-          className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:opacity-50"
-        >
-          {isLoading ? '로딩 중...' : '새로고침'}
-        </button>
-      </div>
-
-      {/* 판매 중인 NFT 목록 */}
-      <div>
-        <h3 className="text-xl font-semibold mb-4">판매 중인 NFT</h3>
-        {listings.length === 0 ? (
-          <p className="text-gray-500">판매 중인 NFT가 없습니다.</p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {listings.map((listing) => (
-              <NFTCard
-                key={listing.tokenId.toString()}
-                listing={listing}
-                onBuy={handleBuy}
-                isOwner={
-                  listing.seller.toLowerCase() === address?.toLowerCase()
-                }
-                onCancel={handleCancel}
-                onClick={() => handleNFTClick(listing)}
+        {/* Search / Filter toolbar */}
+        <div className="rounded-2xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="p-4 flex flex-col md:flex-row md:items-center gap-3">
+            <div className="flex-1">
+              <input
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                placeholder="NFT 이름 또는 Token ID 검색"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-300
+                           dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-white/10"
               />
-            ))}
+            </div>
+
+            <label
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm
+                              bg-white hover:bg-slate-50 cursor-pointer
+                              dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+            >
+              <input
+                type="checkbox"
+                checked={onlyMine}
+                onChange={(e) => setOnlyMine(e.target.checked)}
+                className="accent-slate-900 dark:accent-white"
+              />
+              내 판매중만 보기
+            </label>
+
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              {filteredListings.length} / {listings.length}개 표시
+            </div>
           </div>
+        </div>
+
+        {/* Grid */}
+        <div className="space-y-3">
+          <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+            판매 중인 NFT
+          </h3>
+
+          {filteredListings.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200/60 bg-white p-8 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-slate-600 dark:text-slate-300">
+                조건에 맞는 NFT가 없습니다.
+              </p>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                검색어/필터를 바꾸거나 새로고침을 눌러보세요.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {filteredListings.map((listing) => (
+                <NFTCard
+                  key={listing.tokenId.toString()}
+                  listing={listing}
+                  tokenDecimals={tokenDecimals}
+                  tokenSymbol={tokenSymbol}
+                  address={address}
+                  onBuy={handleBuy}
+                  onCancel={handleCancel}
+                  onClick={() => handleNFTClick(listing)}
+                  onCopy={copyToClipboard}
+                  isBusy={isTxPending}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Detail modal */}
+        {selectedNFT && (
+          <NFTDetailModal
+            listing={selectedNFT}
+            details={nftDetails}
+            onClose={() => {
+              setSelectedNFT(null);
+              setNftDetails(null);
+            }}
+            onBuy={handleBuy}
+            onCancel={handleCancel}
+            address={address}
+            tokenDecimals={tokenDecimals}
+            tokenSymbol={tokenSymbol}
+            onCopy={copyToClipboard}
+            isBusy={isTxPending}
+          />
         )}
       </div>
-
-      {/* NFT 상세 정보 모달 */}
-      {selectedNFT && (
-        <NFTDetailModal
-          listing={selectedNFT}
-          details={nftDetails}
-          onClose={() => {
-            setSelectedNFT(null);
-            setNftDetails(null);
-          }}
-          onBuy={handleBuy}
-          isOwner={selectedNFT.seller.toLowerCase() === address?.toLowerCase()}
-          onCancel={handleCancel}
-          address={address}
-        />
-      )}
     </div>
   );
 }
 
-// NFT 카드 컴포넌트
 function NFTCard({
   listing,
+  tokenDecimals,
+  tokenSymbol,
+  address,
   onBuy,
-  isOwner,
   onCancel,
   onClick,
+  onCopy,
+  isBusy,
 }: {
   listing: NFTListing;
+  tokenDecimals: number;
+  tokenSymbol: string;
+  address?: `0x${string}`;
   onBuy: (tokenId: bigint, price: bigint) => void;
-  isOwner: boolean;
   onCancel: (tokenId: bigint) => void;
   onClick: () => void;
+  onCopy: (text: string) => void;
+  isBusy: boolean;
 }) {
-  const [image, setImage] = useState<string | null>(null);
-  const [name, setName] = useState<string>(
-    `NFT #${listing.tokenId.toString()}`
-  );
-
-  // IPFS URL을 게이트웨이 URL로 변환
-  const convertIPFSUrl = (url: string): string => {
-    if (url.startsWith('ipfs://')) {
-      const hash = url.replace('ipfs://', '');
-      return getIPFSGatewayUrl(hash);
-    }
-    return url;
-  };
-
-  useEffect(() => {
-    const loadMetadata = async () => {
-      try {
-        const { getTokenURI } = await import('@/lib/contracts');
-        const { getIPFSGatewayUrl } = await import('@/lib/ipfs');
-
-        const tokenURI = await getTokenURI(listing.tokenId);
-        let url = tokenURI;
-        if (tokenURI.startsWith('ipfs://')) {
-          const hash = tokenURI.replace('ipfs://', '');
-          url = getIPFSGatewayUrl(hash);
-        }
-
-        const response = await fetch(url);
-        if (response.ok) {
-          const metadata = await response.json();
-
-          // 이미지 URL도 IPFS 형식이면 변환
-          let imageUrl = metadata.image;
-          if (imageUrl) {
-            imageUrl = convertIPFSUrl(imageUrl);
-          }
-
-          setImage(imageUrl);
-          setName(metadata.name || `NFT #${listing.tokenId.toString()}`);
-        } else {
-          console.warn('메타데이터 조회 실패:', url, response.status);
-        }
-      } catch (error) {
-        console.error('메타데이터 로드 오류:', error);
-      }
-    };
-
-    loadMetadata();
-  }, [listing.tokenId]);
+  const isOwner = listing.seller.toLowerCase() === address?.toLowerCase();
 
   return (
     <div
-      className="p-4 bg-white dark:bg-gray-800 rounded-lg shadow-lg cursor-pointer hover:shadow-xl transition-shadow"
+      className="group rounded-2xl border border-slate-200/60 bg-white shadow-sm
+                 hover:shadow-md hover:-translate-y-[1px] transition
+                 dark:border-slate-800 dark:bg-slate-900 cursor-pointer"
       onClick={onClick}
     >
-      {image && (
+      {listing.image ? (
         <img
-          src={image}
-          alt={name}
-          className="w-full h-48 object-cover rounded-lg mb-4"
+          src={listing.image}
+          alt={listing.name || `NFT #${listing.tokenId.toString()}`}
+          className="h-48 w-full rounded-t-2xl object-cover bg-slate-100 dark:bg-slate-800"
         />
+      ) : (
+        <div className="h-48 w-full rounded-t-2xl bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-900" />
       )}
-      <h4 className="font-semibold mb-2">{name}</h4>
-      <p className="text-sm text-gray-500 mb-2">
-        Token ID: {listing.tokenId.toString()}
-      </p>
-      <p className="text-lg font-bold mb-4">
-        가격: {formatTokenAmount(listing.price)} MTK
-      </p>
-      <div className="flex gap-2">
-        {isOwner ? (
+
+      <div className="p-4">
+        <div className="flex items-start justify-between gap-2">
+          <h4 className="font-semibold text-slate-900 dark:text-slate-100 line-clamp-1">
+            {listing.name || `NFT #${listing.tokenId.toString()}`}
+          </h4>
+
+          {isOwner && (
+            <span
+              className="shrink-0 text-[11px] px-2 py-1 rounded-full
+                             bg-emerald-50 text-emerald-700 border border-emerald-200
+                             dark:bg-emerald-900/30 dark:text-emerald-200 dark:border-emerald-800"
+            >
+              내 판매중
+            </span>
+          )}
+        </div>
+
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Token ID: {listing.tokenId.toString()}
+          </p>
+          <button
+            className="text-[11px] rounded-lg px-2 py-1
+                       border border-slate-200 bg-white hover:bg-slate-50
+                       dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCopy(listing.tokenId.toString());
+            }}
+          >
+            ID 복사
+          </button>
+        </div>
+
+        <p className="mt-3 text-lg font-bold text-slate-900 dark:text-slate-100">
+          {formatTokenAmount(listing.price, tokenDecimals)} {tokenSymbol}
+        </p>
+
+        <div className="mt-4 flex gap-2">
+          {isOwner ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onCancel(listing.tokenId);
+              }}
+              disabled={isBusy}
+              className="flex-1 rounded-xl px-4 py-2 text-sm font-medium
+                         bg-rose-600 text-white hover:bg-rose-500
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              취소
+            </button>
+          ) : (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onBuy(listing.tokenId, listing.price);
+              }}
+              disabled={isBusy}
+              className="flex-1 rounded-xl px-4 py-2 text-sm font-medium
+                         bg-slate-900 text-white hover:bg-slate-800
+                         disabled:opacity-50 disabled:cursor-not-allowed
+                         dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
+            >
+              구매
+            </button>
+          )}
+
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onCancel(listing.tokenId);
+              onClick();
             }}
-            className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+            className="rounded-xl px-4 py-2 text-sm font-medium
+                       border border-slate-200 bg-white hover:bg-slate-50
+                       dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
           >
-            판매 취소
+            상세
           </button>
-        ) : (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onBuy(listing.tokenId, listing.price);
-            }}
-            className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
-          >
-            구매하기
-          </button>
-        )}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onClick();
-          }}
-          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-        >
-          상세보기
-        </button>
+        </div>
       </div>
     </div>
   );
 }
 
-// NFT 상세 정보 모달 컴포넌트
 function NFTDetailModal({
   listing,
   details,
   onClose,
   onBuy,
-  isOwner,
   onCancel,
   address,
+  tokenDecimals,
+  tokenSymbol,
+  onCopy,
+  isBusy,
 }: {
   listing: NFTListing;
-  details: {
-    description?: string;
-    attributes?: any[];
-    owner?: string;
-  } | null;
+  details: { description?: string; attributes?: any[]; owner?: string } | null;
   onClose: () => void;
   onBuy: (tokenId: bigint, price: bigint) => void;
-  isOwner: boolean;
   onCancel: (tokenId: bigint) => void;
-  address?: string;
+  address?: `0x${string}`;
+  tokenDecimals: number;
+  tokenSymbol: string;
+  onCopy: (text: string) => void;
+  isBusy: boolean;
 }) {
-  const getEtherscanUrl = (tokenId: bigint) => {
-    return `https://sepolia.etherscan.io/token/0xDa3f9D3950e8e274a9e61c5FC55a632D64f2Ec69?a=${tokenId.toString()}`;
-  };
-
-  const getAddressUrl = (addr: string) => {
-    return `https://sepolia.etherscan.io/address/${addr}`;
-  };
+  const isOwner = listing.seller.toLowerCase() === address?.toLowerCase();
+  const getAddressUrl = (addr: string) =>
+    `https://sepolia.etherscan.io/address/${addr}`;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black/40 z-[9999] flex items-center justify-center p-4">
+      <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
         <div className="p-6">
-          <div className="flex justify-between items-start mb-4">
-            <h2 className="text-2xl font-bold">
-              {listing.name || `NFT #${listing.tokenId.toString()}`}
-            </h2>
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-slate-100">
+                {listing.name || `NFT #${listing.tokenId.toString()}`}
+              </h2>
+              {isOwner && (
+                <span
+                  className="text-xs px-2 py-1 rounded-full
+                                 bg-emerald-50 text-emerald-700 border border-emerald-200
+                                 dark:bg-emerald-900/30 dark:text-emerald-200 dark:border-emerald-800"
+                >
+                  내 판매중
+                </span>
+              )}
+            </div>
+
             <button
               onClick={onClose}
-              className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 text-2xl"
+              className="rounded-xl px-3 py-2 text-sm font-medium
+                         border border-slate-200 bg-white hover:bg-slate-50
+                         dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
             >
-              ✕
+              닫기
             </button>
           </div>
 
-          {/* 이미지 */}
           {listing.image && (
-            <div className="mb-6">
+            <div className="mt-5">
               <img
                 src={listing.image}
                 alt={listing.name}
-                className="w-full h-96 object-contain rounded-lg bg-gray-100 dark:bg-gray-700"
-                onError={(e) => {
-                  console.error('이미지 로드 실패:', listing.image);
-                  e.currentTarget.style.display = 'none';
-                }}
+                className="w-full h-80 md:h-96 object-contain rounded-2xl bg-slate-50 dark:bg-slate-800"
               />
             </div>
           )}
 
-          {/* 기본 정보 */}
-          <div className="space-y-4 mb-6">
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
-                Token ID
-              </h3>
-              <p className="text-lg font-mono">{listing.tokenId.toString()}</p>
-            </div>
-
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
-                가격
-              </h3>
-              <p className="text-2xl font-bold text-green-600 dark:text-green-400">
-                {formatTokenAmount(listing.price, 18)} MTK
-              </p>
-            </div>
-
-            {details?.owner && (
-              <div>
-                <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  현재 소유자
-                </h3>
-                <div className="flex items-center gap-2">
-                  <code className="text-sm font-mono bg-gray-100 dark:bg-gray-700 px-3 py-1 rounded">
-                    {details.owner}
-                  </code>
-                  <a
-                    href={getAddressUrl(details.owner)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-blue-500 hover:text-blue-600"
-                  >
-                    Etherscan ↗
-                  </a>
+          <div className="mt-6 grid grid-cols-1 gap-3">
+            <div className="rounded-2xl border border-slate-200/60 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-800/40">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Token ID
+                  </p>
+                  <p className="mt-1 font-mono text-slate-900 dark:text-slate-100">
+                    {listing.tokenId.toString()}
+                  </p>
                 </div>
+                <button
+                  className="rounded-xl px-3 py-2 text-xs font-medium
+                             border border-slate-200 bg-white hover:bg-slate-50
+                             dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+                  onClick={() => onCopy(listing.tokenId.toString())}
+                >
+                  ID 복사
+                </button>
+              </div>
+
+              <div className="mt-4">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  가격
+                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">
+                  {formatTokenAmount(listing.price, tokenDecimals)}{' '}
+                  {tokenSymbol}
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200/60 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                판매자
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <code className="text-xs font-mono rounded-xl bg-slate-100 px-3 py-2 dark:bg-slate-800 dark:text-slate-100">
+                  {listing.seller}
+                </code>
+                <button
+                  className="rounded-xl px-3 py-2 text-xs font-medium
+                             border border-slate-200 bg-white hover:bg-slate-50
+                             dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+                  onClick={() => onCopy(listing.seller)}
+                >
+                  주소 복사
+                </button>
+                <a
+                  href={getAddressUrl(listing.seller)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded-xl px-3 py-2 text-xs font-medium bg-slate-900 text-white hover:bg-slate-800
+                             dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
+                >
+                  Etherscan ↗
+                </a>
+              </div>
+
+              {details?.owner && (
+                <>
+                  <p className="mt-5 text-xs text-slate-500 dark:text-slate-400">
+                    현재 소유자
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <code className="text-xs font-mono rounded-xl bg-slate-100 px-3 py-2 dark:bg-slate-800 dark:text-slate-100">
+                      {details.owner}
+                    </code>
+                    <button
+                      className="rounded-xl px-3 py-2 text-xs font-medium
+                                 border border-slate-200 bg-white hover:bg-slate-50
+                                 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+                      onClick={() => onCopy(details.owner!)}
+                    >
+                      주소 복사
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {details?.description && (
+              <div className="rounded-2xl border border-slate-200/60 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  설명
+                </p>
+                <p className="mt-2 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap">
+                  {details.description}
+                </p>
               </div>
             )}
 
-            {listing.seller && (
-              <div>
-                <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  판매자
-                </h3>
-                <div className="flex items-center gap-2">
-                  <code className="text-sm font-mono bg-gray-100 dark:bg-gray-700 px-3 py-1 rounded">
-                    {listing.seller}
-                  </code>
-                  <a
-                    href={getAddressUrl(listing.seller)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-blue-500 hover:text-blue-600"
-                  >
-                    Etherscan ↗
-                  </a>
+            {details?.attributes && details.attributes.length > 0 && (
+              <div className="rounded-2xl border border-slate-200/60 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  속성
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {details.attributes.map((attr: any, idx: number) => (
+                    <div
+                      key={idx}
+                      className="rounded-2xl border border-slate-200/60 bg-slate-50 p-3
+                                 dark:border-slate-800 dark:bg-slate-800/40"
+                    >
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {attr.trait_type || '속성'}
+                      </p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {attr.value}
+                      </p>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
           </div>
 
-          {/* 설명 */}
-          {details?.description && (
-            <div className="mb-6">
-              <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">
-                설명
-              </h3>
-              <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
-                {details.description}
-              </p>
-            </div>
-          )}
-
-          {/* 속성 */}
-          {details?.attributes && details.attributes.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">
-                속성
-              </h3>
-              <div className="grid grid-cols-2 gap-2">
-                {details.attributes.map((attr: any, index: number) => (
-                  <div
-                    key={index}
-                    className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg"
-                  >
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                      {attr.trait_type || '속성'}
-                    </p>
-                    <p className="text-sm font-semibold">{attr.value}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* 액션 버튼 */}
-          <div className="flex gap-3 pt-4 border-t">
+          <div className="mt-6 flex gap-3">
             {isOwner ? (
               <button
                 onClick={() => {
                   onCancel(listing.tokenId);
                   onClose();
                 }}
-                className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                disabled={isBusy}
+                className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold
+                           bg-rose-600 text-white hover:bg-rose-500
+                           disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 판매 취소
               </button>
@@ -758,19 +916,24 @@ function NFTDetailModal({
                   onBuy(listing.tokenId, listing.price);
                   onClose();
                 }}
-                className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                disabled={isBusy}
+                className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold
+                           bg-slate-900 text-white hover:bg-slate-800
+                           disabled:opacity-50 disabled:cursor-not-allowed
+                           dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
               >
                 구매하기
               </button>
             )}
-            <a
-              href={getEtherscanUrl(listing.tokenId)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-center"
+
+            <button
+              onClick={onClose}
+              className="rounded-xl px-4 py-3 text-sm font-semibold
+                         border border-slate-200 bg-white hover:bg-slate-50
+                         dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
             >
-              Etherscan ↗
-            </a>
+              닫기
+            </button>
           </div>
         </div>
       </div>
