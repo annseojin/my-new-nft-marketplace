@@ -23,7 +23,6 @@ export default function Home() {
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       {/* Top gradient glow */}
       <div className="pointer-events-none fixed inset-x-0 -top-24 h-64 bg-gradient-to-b from-indigo-500/15 via-fuchsia-500/10 to-transparent blur-2xl dark:from-indigo-400/10 dark:via-fuchsia-400/10" />
-
       {/* Header */}
       <header className="sticky top-0 z-50 border-b border-slate-200/60 bg-white/75 backdrop-blur dark:border-slate-800/70 dark:bg-slate-950/65">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -79,7 +78,6 @@ export default function Home() {
           </div>
         </div>
       </header>
-
       {/* Main */}
       <main className="relative mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
         <div className="rounded-3xl border border-slate-200/60 bg-white/80 shadow-sm backdrop-blur dark:border-slate-800/70 dark:bg-slate-950/40">
