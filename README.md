@@ -94,21 +94,23 @@ npm run dev
 - MetaMask 또는 기타 Web3 지갑을 연결할 수 있습니다
 - Sepolia 테스트넷으로 자동 전환됩니다
 
-### 2. NFT 민팅
+### 2. NFT 민팅 ✅
 
-- **중요**: `MyNFT` 컨트랙트의 `safeMint` 함수는 `onlyOwner`로 설정되어 있습니다
-- 컨트랙트 소유자만 직접 민팅할 수 있습니다
-- 일반 사용자가 민팅하려면:
-  - 컨트랙트 소유자가 민팅 함수를 공개하도록 수정하거나
-  - 별도의 민팅 함수를 추가해야 합니다
+* `MyNFT` 컨트랙트에는 관리자 전용 `safeMint` 함수가 존재합니다
+* **추가로, 누구나 민팅 가능한 `publicMint(string tokenURI)` 함수가 구현되었습니다** ✅
+* 일반 사용자는 `publicMint`를 통해 NFT를 직접 민팅할 수 있습니다
 
-**현재 구현된 민팅 프로세스:**
+**현재 구현된 민팅 프로세스 (확장 반영):**
 
 1. 이미지 파일 선택
 2. NFT 이름과 설명 입력
 3. 이미지를 IPFS에 업로드
-4. 메타데이터를 생성하고 IPFS에 업로드
-5. `safeMint` 함수 호출 (컨트랙트 소유자만 가능)
+4. 메타데이터(JSON)를 생성하고 IPFS에 업로드
+5. **`publicMint(tokenURI)` 함수 호출 → 민팅 완료** ✅
+
+> `safeMint`는 관리자(컨트랙트 소유자)용으로 유지됩니다.
+
+---
 
 ### 3. 마켓플레이스
 
@@ -117,11 +119,13 @@ npm run dev
 - 마켓플레이스에 등록된 모든 NFT를 조회합니다
 - NFT 이미지, 이름, 가격을 확인할 수 있습니다
 
-#### NFT 구매
+#### NFT 구매 (MTK 토큰 사용) ✅
 
 1. 구매하려는 NFT의 "구매하기" 버튼 클릭
-2. 토큰 승인이 필요한 경우 자동으로 승인됩니다
+2. **ERC-20 토큰(MTK) allowance가 부족한 경우 자동 승인 처리** ✅
 3. 구매 트랜잭션 확인 후 NFT 소유권이 이전됩니다
+
+> 모든 NFT 거래는 **ERC-20 토큰(MTK)만을 결제 수단으로 사용**합니다.
 
 #### NFT 판매 등록
 
@@ -147,10 +151,6 @@ npm run dev
 - 다른 사용자로부터 토큰을 받아야 합니다
 - 마켓플레이스에서 NFT를 구매하려면 MTK 토큰이 필요합니다
 
-### NFT 민팅 권한 문제 해결
-
-현재 `MyNFT.sol`의 `safeMint`는 `onlyOwner`입니다. 일반 사용자가 민팅할 수 있도록 하려면:
-
 **옵션 1: 컨트랙트 수정 (권장)**
 
 ```solidity
@@ -173,6 +173,14 @@ function publicMint(address to, string memory _tokenURI) public {
     _setTokenURI(tokenId, _tokenURI);
 }
 ```
+### MyToken (MTK) 토큰 받기  (Faucet 기능 추가)
+
+* **TokenFaucet 컨트랙트를 통해 MTK 토큰을 1회 지급받을 수 있습니다** 
+* `내 프로필(Profile)` 탭에서 **“토큰 받기” 버튼**을 통해 신청
+* **지갑 주소당 1회 제한**
+* 지급된 MTK 토큰은 NFT 구매에 사용됩니다
+
+---
 
 ## 📁 프로젝트 구조
 
@@ -186,6 +194,8 @@ src/
 │   ├── WalletConnect.tsx    # 지갑 연결 컴포넌트
 │   ├── MintNFT.tsx          # NFT 민팅 컴포넌트
 │   ├── Marketplace.tsx      # 마켓플레이스 컴포넌트
+│   ├── Profile.tsx          # MTK Faucet / 잔액 조회 / 토큰 전송
+│   ├── ContractInfo.tsx     # 컨트랙트 주소 / Etherscan 링크
 │   └── providers.tsx        # Wagmi Provider
 └── lib/
     ├── constants.ts         # 컨트랙트 주소 및 설정
@@ -194,7 +204,8 @@ src/
     ├── wagmi.ts             # Wagmi 설정
     ├── nftAbi.json          # NFT 컨트랙트 ABI
     ├── marketplaceAbi.json  # 마켓플레이스 컨트랙트 ABI
-    └── tokenAbi.json        # 토큰 컨트랙트 ABI
+    ├── tokenAbi.json        # 토큰 컨트랙트 ABI
+    └── faucetAbi.json
 ```
 
 ## 🔍 트러블슈팅
